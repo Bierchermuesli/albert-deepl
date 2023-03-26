@@ -2,10 +2,10 @@
 This is an Albert Extension for DeepL translations. This extension has a Albert-style-configuration-dialog. 
 
  - formal/informal translation
+ - helps to find any available language/ISO Code and sets default source/target language temporary for this session or permanent
  - temporary and persistent settings (formal, target and source language)
  - tracking usage
- - helps to find the propper ISO Code or sets temporary default source/Target
-
+ 
 
 ![image](https://user-images.githubusercontent.com/13567009/227779234-02ff9f86-e606-4d0d-bb46-4fa75bb2a89c.png)
 
@@ -19,7 +19,7 @@ git clone https://github.com/Bierchermuesli/albert-deepl.git  ~/.local/share/alb
 ```
 
 ## DeepL API
-This extension  needs a valid DeepL API key. You can optain one on https://www.deepl.com/pro#developer.
+This extension needs a valid DeepL API key. You can optain one on https://www.deepl.com/pro#developer. Please check their policy about usage, privacy. 
 
 After you got your key you can install in a Albert-manner like this:
  - `dpl conf set key=xxx`
