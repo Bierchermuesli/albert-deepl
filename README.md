@@ -17,6 +17,10 @@ in your terminal:
 ```
 git clone https://github.com/Bierchermuesli/albert-deepl.git  ~/.local/share/albert/python/plugins/deepl
 ```
+ - restart albert
+ - enable this extension in plugin Tab 
+ - it might ask you for installing python deepl module
+ - maybe start albert again :-)
 
 ## DeepL API
 This extension needs a valid DeepL API key. You can optain one on https://www.deepl.com/pro#developer. Please check their policy about usage, privacy. 
@@ -38,7 +42,7 @@ This is just a Idea. ATM only simiple key-value are supported. If you save the v
 Ideas:
   - self-describing configuration file?
   - dicts / lists?
-  - move default configuration actions in CPython?
+  - move default the conf functions to CPython for other plugins?
 
 any feedback is welcome
 
