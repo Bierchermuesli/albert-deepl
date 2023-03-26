@@ -31,7 +31,8 @@ For this special case you have to **save** and reload the config (or reload albe
 ## Albert conf dialog
 This is just a Idea. ATM only simiple key-value are supported. If you save the values, it is stored as a yaml in `configLocation()`, usually `~/.config/albert/DeepL Translate.yaml`
 
-![image](https://user-images.githubusercontent.com/13567009/227779674-7a3393f8-9937-4d31-9b5e-fa5d9633ed53.png)
+![image](https://user-images.githubusercontent.com/13567009/227781225-a64f454c-395d-4d2c-840d-41b45d02bcd1.png)
+
 
 ![image](https://user-images.githubusercontent.com/13567009/227779754-7ce5887b-6690-4394-8b96-f1e72f0a55e3.png)
 Ideas:
