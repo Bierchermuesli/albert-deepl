@@ -3,387 +3,250 @@
 """
 Translator using deepl API
  - <trigger> [src] dst] text
- 
-This plugin uses a albert-style configuration option
- - config [save|reload|open|set key=value]
 """
 from albert import *
 import deepl
+import threading
+from pathlib import Path
 
-from time import sleep
-import os
-import re
-import yaml
-
-md_iid = "0.5"
-md_version = "1.0"
+md_iid = "4.0"
+md_version = "2.3"
 md_name = "DeepL Translate"
 md_description = "Translate words and sentences using deepl"
-md_license = "BSD-3"
+md_license = "MIT"
 md_url = "https://github.com/albertlauncher/python/"
-md_lib_dependencies = "deepl"
+md_lib_dependencies = ["deepl"]
 md_maintainers = "@bierchermuesli"
 
 
-class Plugin(QueryHandler):
-    def id(self):
-        return md_id
+class Plugin(PluginInstance, TriggerQueryHandler):
+    # --- private attributes
+    _api_key = ""
+    _default_source_lang = ""
+    _default_target_lang = "EN-US"
+    _formal = False
+    
+    # --- plugin state
+    translator = None
+    languages = None
+    initializing = False
 
-    def name(self):
-        return md_name
+    def __init__(self):
+        TriggerQueryHandler.__init__(self)
+        PluginInstance.__init__(self)
+        self.icon_path = Path(__file__).parent / "icon.svg"
+        self._init_configuration()
+        self._initialize_translator()
 
-    def description(self):
-        return md_description
+    # --- properties for settings
+    @property
+    def api_key(self):
+        return self._api_key
+
+    @api_key.setter
+    def api_key(self, value):
+        self._api_key = value
+        self.writeConfig("api_key", value)
+        self._initialize_translator() # Re-initialize when key changes
+
+    @property
+    def default_source_lang(self):
+        return self._default_source_lang
+
+    @default_source_lang.setter
+    def default_source_lang(self, value):
+        self._default_source_lang = value
+        self.writeConfig("default_source_lang", value)
+
+    @property
+    def default_target_lang(self):
+        return self._default_target_lang
+
+    @default_target_lang.setter
+    def default_target_lang(self, value):
+        self._default_target_lang = value
+        self.writeConfig("default_target_lang", value)
+
+    @property
+    def formal(self):
+        return self._formal
+
+    @formal.setter
+    def formal(self, value):
+        self._formal = value
+        self.writeConfig("formal", value)
+        
+    def _init_configuration(self):
+        """Load settings from config file or set defaults."""
+        for key, type, default in [
+            ("api_key", str, self._api_key),
+            ("default_source_lang", str, self._default_source_lang),
+            ("default_target_lang", str, self._default_target_lang),
+            ("formal", bool, self._formal),
+        ]:
+            conf = self.readConfig(key, type)
+            if conf is None:
+                self.writeConfig(key, default)
+            else:
+                setattr(self, f"_{key}", conf)
+    
+    def configWidget(self):
+        return [
+            {"type": "label", "text": __doc__},
+            {
+                "type": "lineedit",
+                "label": "API Key",
+                "property": "api_key",
+                "widget_properties": {"placeholderText": "Your DeepL API Key (Free or Pro)"}
+            },
+            {
+                "type": "lineedit",
+                "label": "Default Source Language",
+                "property": "default_source_lang",
+                "widget_properties": {"placeholderText": "e.g., EN (leave empty for auto-detect)"}
+            },
+            {
+                "type": "lineedit",
+                "label": "Default Target Language",
+                "property": "default_target_lang",
+                "widget_properties": {"placeholderText": "e.g., DE, EN-US, PT-PT"}
+            },
+            {"type": "checkbox", "label": "Prefer formal language", "property": "formal"},
+            {"type": "label", "text": "Note: Changes to the API key require an app restart to take full effect if the key was previously invalid."},
+        ]
 
     def defaultTrigger(self):
         return "dpl "
 
-    def synopsis(self):
-        return "[[src] dst] text|usage|conf"
+    def synopsis(self, query):
+        return "[[src] dst] text | usage | from [lang] | to [lang]"
 
-    def initialize(self):
-        self.icon = [os.path.dirname(__file__) + "/icon.svg"]
-        self.user_config_file = configLocation() + "/" + md_name + ".yaml"
-
-        # simple merge with user config - if any
-        self.conf = self.conf_load(os.path.dirname(__file__) + "/config-defaults.yaml")
-        self.conf.update(self.conf_load(self.user_config_file))
-        if self.conf["key"]:
-            try:
-                self.translator = deepl.Translator(self.conf["key"])
-                # load avaiable languages
-                self.deepl_languages = {
-                    "source": {
-                        x.code: x.name for x in self.translator.get_source_languages()
-                    },
-                    "target": {
-                        x.code: x.name for x in self.translator.get_target_languages()
-                    },
-                }
-            except deepl.exceptions.AuthorizationException as e:
-                self.translator = str(e)
-            except:
-                self.translator = "Unable to connect to API"
-        else:
-            self.translator = "no API Key set"
-
-    def handle_formality(self):
-        """stupid function, it just return config boolean, flag value or human text."""
-        if self.conf["formal"]:
-            return True, "prefer_more", "Formal"
-        else:
-            return False, "prefer_less", "Informal"
-
-    # some config functions
-    def conf_update(self, k, v):
-        """Updates Running Config, it tries to maintain booleans and None Type"""
-        if isinstance(v, str):
-            if v.lower() == "true":
-                v = True
-            elif v.lower() == "false":
-                v = False
-            elif v == "" or v.lower() == "none":
-                v = None
-        self.conf[k] = v
-
-        sendTrayNotification(
-            title="'{}' set to '{}'".format(k, v),
-            msg="Hit '<trigger> conf save' for permanent configuration",
-        )
-
-    def conf_save(self, file, dict):
-        """saves configuration into a yaml file"""
+    def _initialize_translator(self):
+        if self.initializing:
+            return
+            
+        self.initializing = True
+        thread = threading.Thread(target=self._init_thread)
+        thread.start()
+        
+    def _init_thread(self):
         try:
-            with open(file, "w") as file:
-                yaml.dump(dict, file)
-            msg = "OK" + str(file.name)
-        except PermissionError as e:
-            msg = str(e)
+            if not self.api_key:
+                raise ValueError("No API Key set.")
+            
+            self.translator = deepl.Translator(self.api_key)
+            self.languages = {
+                "source": {lang.code: lang.name for lang in self.translator.get_source_languages()},
+                "target": {lang.code: lang.name for lang in self.translator.get_target_languages()},
+            }
+            info(f"DeepL plugin initialized successfully.")
+        except Exception as e:
+            self.translator = None
+            self.languages = None
+            warning(f"DeepL initialization failed: {e}")
+        finally:
+            self.initializing = False
 
-        sendTrayNotification(title="Config Saved", msg=msg)
+    def _handle_lang_query(self, query, direction: str, search_term: str):
+        items = []
+        lang_dict = self.languages.get(direction, {})
+        
+        for code, name in lang_dict.items():
+            if not search_term or search_term.lower() in code.lower() or search_term.lower() in name.lower():
+                items.append(StandardItem(
+                    id=f"{direction}_{code}",
+                    text=f"{code} - {name}",
+                    subtext=f"Set as default {direction} language",
+                    icon_factory=lambda: makeImageIcon(str(self.icon_path)),
+                    actions=[Action(f"set_default_{direction}", f"Set as Default {direction.capitalize()}", lambda c=code, d=direction: setattr(self, f'_default_{d}_lang', c))]
+                ))
+        query.add(items)
 
-    def conf_load(self, file):
-        """loads configuration yaml file - if exist, returns a dict"""
-        if os.path.isfile(file):
-            debug(f"Config file found: {file}")
-            with open(file) as f:
-                try:
-                    return yaml.safe_load(f)
-                except yaml.YAMLError as e:
-                    debug(f"Error loading YAML config file {file}: {e}")
-        return {}
+    def handleTriggerQuery(self, query):
+        if not query.isValid:
+            return
 
-    def conf_toggle(self, k):
-        """just toggles boolean values"""
-        self.conf_update(k, not self.conf[k])
+        stripped_query = query.string.strip()
 
-    def conf_unset(self, k):
-        """just unset values"""
-        self.conf_update(k, None)
+        if self.initializing:
+            query.add(StandardItem(id=md_name, text="Initializing...", subtext="Connecting to DeepL API...", icon_factory=lambda: makeImageIcon(str(self.icon_path))))
+            return
 
-    def handleQuery(self, query):
-        match = re.match(
-            "(?P<cmd>usage|conf)\s*(?P<subcmd>save|set|reload|open)?\s*(?:(?P<k>\w+)=(?P<v>.*))?|(?:(?P<src>\w{2})\s+)?(?:(?P<dst>\w{2})\s+)?(?P<text>.*)",
-            query.string.strip(),
-        )
-        if match and match["text"]:
-            if isinstance(self.translator, str):
-                query.add(
-                    Item(
-                        id=md_id, icon=self.icon, text="Error", subtext=self.translator
-                    )
-                )
-                if not self.conf["key"]:
-                    query.add(
-                        Item(
-                            id=md_id,
-                            icon=self.icon,
-                            text="Optain a API Key",
-                            subtext="Configure with '{} conf set key=xxx'".format(
-                                query.trigger
-                            ),
-                            completion=query.trigger + "conf set key=xyz",
-                            actions=[
-                                Action(
-                                    "url",
-                                    "Open deepl.com",
-                                    lambda url="https://www.deepl.com/pro#developer": openUrl(
-                                        url
-                                    ),
-                                )
-                            ],
-                        )
-                    )
-                return
-            # fetch defaults
-            source = self.conf.get("source", "")
-            target = self.conf.get("target", "")
+        if not self.translator or not self.languages:
+            actions = [Action("open_settings", "Open Settings", lambda: openConfig())]
+            if not self.api_key:
+                actions.insert(0, Action("url", "Get API Key", lambda: openUrl("https://www.deepl.com/pro#developer")))
+            query.add(StandardItem(
+                id=md_name, text="DeepL not configured or failed to initialize",
+                subtext="Please check your API key and network connection.",
+                icon_factory=lambda: makeImageIcon(str(self.icon_path)),
+                actions=actions
+            ))
+            return
 
-            # swap src / dst if only one is provided
-            if match["src"]:
-                target = (
-                    match["src"].upper() if not match["dst"] else match["dst"].upper()
-                )
-                source = match["src"].upper()
+        if stripped_query.startswith("from"):
+            search_term = stripped_query[4:].strip()
+            self._handle_lang_query(query, "source", search_term)
+            return
+            
+        if stripped_query.startswith("to"):
+            search_term = stripped_query[2:].strip()
+            self._handle_lang_query(query, "target", search_term)
+            return
 
-            # deepL has some target language variants, map them to avoid any errors
-            target_mapping = {"EN": "EN-US", "PT": "PT-PT"}
-            if target in target_mapping:
-                target = target_mapping[target]
+        if stripped_query == "usage":
+            thread = threading.Thread(target=self._get_usage, args=(query,))
+            thread.start()
+            return
+        
+        thread = threading.Thread(target=self._run_translation, args=(query,))
+        thread.start()
 
-            # validate if desired language exist and offer a list
-            for direction in ["source", "target"]:
-                language = locals()[direction]
-                if language and language not in self.deepl_languages[direction]:
-                    query.add(
-                        Item(
-                            id=md_id,
-                            icon=self.icon,
-                            text=f"{language} is an unknown {direction} language.",
-                            subtext="Choose any of them:",
-                        )
-                    )
-                    for code, name in self.deepl_languages[direction].items():
-                        query.add(
-                            Item(
-                                id=md_id,
-                                icon=self.icon,
-                                text=f"{code} - {name}",
-                                subtext="Tab to switch or Enter to set as default",
-                                completion="{}{} {}".format(
-                                    query.trigger, code, match["text"]
-                                ),
-                                actions=[
-                                    Action(
-                                        id="Update",
-                                        text=f"Set as {direction} default",
-                                        callable=lambda k=direction, l=code: self.conf_update(
-                                            k, l
-                                        ),
-                                    )
-                                ],
-                            )
-                        )
-                    return
-            # so we can finlay ask the API
-            for number in range(50):
-                sleep(0.01)
-                if not query.isValid:
-                    return
-            try:
-                translation = self.translator.translate_text(
-                    match["text"],
-                    source_lang=source,
-                    target_lang=target,
-                    formality=self.handle_formality()[1],
-                )
-            except deepl.DeepLException as e:
-                return query.add(Item(id=md_id, text="Error", subtext=str(e)))
-
-            query.add(
-                Item(
-                    id=md_id,
-                    text=translation.text,
-                    subtext="From {} to {} - {}".format(
-                        translation.detected_source_lang,
-                        target,
-                        self.handle_formality()[2],
-                    ),
-                    icon=self.icon,
-                    actions=[
-                        Action(
-                            "copy",
-                            "Copy to clipboard",
-                            lambda t=translation.text: setClipboardText(t),
-                        ),
-                        Action(
-                            "function",
-                            "Toggle formal",
-                            lambda: self.conf_toggle("formal"),
-                        ),
-                    ],
-                )
-            )
-
-        elif match["cmd"] == "usage":
+    def _get_usage(self, query: Query):
+        try:
             usage = self.translator.get_usage()
-            query.add(
-                Item(
-                    id=md_id,
-                    text="This Months limit reached."
-                    if usage.any_limit_reached
-                    else "We are below the limit",
-                    subtext=f"Character usage: {usage.character.count} of {usage.character.limit}",
-                    icon=self.icon,
-                )
-            )
-        elif match["cmd"] == "conf":
-            # List all config items if no subcmd supplied
-            if not match["subcmd"]:
-                for k, v in self.conf.items():
-                    actions = []
+            text = "This Month's limit reached" if usage.any_limit_reached else "Usage is within limits"
+            subtext = f"Characters: {usage.character.count} of {usage.character.limit}" if usage.character else ""
+            query.add(StandardItem(id="usage", text=text, subtext=subtext, icon_factory=lambda: makeImageIcon(str(self.icon_path))))
+        except Exception as e:
+            query.add(StandardItem(id="usage_err", text="Error getting usage", subtext=str(e), icon_factory=lambda: makeImageIcon(str(self.icon_path))))
+            
+    def conf_toggle(self, key, current_value):
+        """Temporary session-only toggle for boolean settings."""
+        setattr(self, f"_{key}", not current_value)
+        info(f"'{key}' toggled to '{getattr(self, f'_{key}')}' for this session.")
 
-                    if isinstance(v, bool):
-                        actions.append(
-                            Action(
-                                id="toggle",
-                                text="Toggle '{}' to {}".format(k, not v),
-                                callable=lambda k=k: self.conf_toggle(k),
-                            )
-                        )
-                    elif isinstance(v, dict):
-                        # not implemented yet
-                        pass
-                    elif isinstance(v, list):
-                        # not implemented yet
-                        pass
+    def _run_translation(self, query: Query):
+        results = []
+        try:
+            parts = query.string.strip().split()
+            src_lang, dst_lang, text = None, None, ""
 
-                    actions.append(
-                        Action(
-                            id="unset",
-                            text="Unset '{}'".format(k),
-                            callable=lambda k=k: self.conf_unset(k),
-                        )
-                    )
-                    actions.append(
-                        Action(
-                            id="copy",
-                            text="Copy key '{}'".format(k),
-                            callable=lambda v=k: setClipboardText(text=v),
-                        )
-                    )
-                    actions.append(
-                        Action(
-                            id="copy",
-                            text="Copy value '{}'".format(v),
-                            callable=lambda v=v: setClipboardText(text=v),
-                        )
-                    )
+            if len(parts) >= 2 and parts[0].upper() in self.languages.get('source', {}) and parts[1].upper() in self.languages.get('target', {}):
+                src_lang, dst_lang, text = parts[0].upper(), parts[1].upper(), " ".join(parts[2:])
+            elif len(parts) >= 1 and parts[0].upper() in self.languages.get('target', {}):
+                src_lang, dst_lang, text = self.default_source_lang or None, parts[0].upper(), " ".join(parts[1:])
+            else:
+                src_lang, dst_lang, text = self.default_source_lang or None, self.default_target_lang, query.string.strip()
 
-                    query.add(
-                        Item(
-                            id=k,
-                            icon=["xdg:emblem-system"],
-                            text=k,
-                            completion=query.trigger + "conf set " + k + "=" + str(v),
-                            subtext=str(v),
-                            actions=actions,
-                        )
-                    )
-            # set mode
-            elif match["subcmd"] == "set":
-                if search_k := match.group("k"):
-                    search_v = match.group("v")
-                    return query.add(
-                        Item(
-                            id="edit",
-                            icon=["xdg:emblem-system"],
-                            text="set {}={}".format(search_k, search_v),
-                            subtext="Previous Value: " + str(self.conf[search_k]) if search_k in self.conf else "Config value does not exist",
-                            actions=[
-                                Action(
-                                    id="Update",
-                                    text="Update " + search_k,
-                                    callable=lambda: self.conf_update(
-                                        search_k, search_v
-                                    ),
-                                )
-                            ],
-                        )
-                    )
-            # list all comands for autocomplete and/or if no subcmd is set
-            if match["subcmd"] == "save" or not match["subcmd"]:
-                query.add(
-                    Item(
-                        id="save",
-                        icon=["xdg:document-save"],
-                        text="Save User Settings",
-                        subtext=self.user_config_file,
-                        completion=query.trigger + "conf save",
-                        actions=[
-                            Action(
-                                id="Update",
-                                text="save to " + self.user_config_file,
-                                callable=lambda: self.conf_save(
-                                    self.user_config_file, self.conf
-                                ),
-                            )
-                        ],
-                    )
-                )
-            if match["subcmd"] == "reload" or not match["subcmd"]:
-                query.add(
-                    Item(
-                        id="reload",
-                        icon=["xdg:document-revert"],
-                        text="Relaod Config",
-                        subtext=self.user_config_file,
-                        completion=query.trigger + "conf reload",
-                        actions=[
-                            Action(
-                                id="Update",
-                                text="save to " + self.user_config_file,
-                                callable=lambda: self.initialize(),
-                            )
-                        ],
-                    )
-                )
-            if match["subcmd"] == "open" or not match["subcmd"]:
-                query.add(
-                    Item(
-                        id="open",
-                        icon=["xdg:document-open"],
-                        text="Open with editor",
-                        subtext=self.user_config_file,
-                        completion=query.trigger + "conf open",
-                        actions=[
-                            Action(
-                                id="open",
-                                text="Open Config File",
-                                callable=lambda: runDetachedProcess(
-                                    cmdln=["xdg-open", self.user_config_file]
-                                ),
-                            )
-                        ],
-                    )
-                )
+            if not text:
+                return
+
+            formality_option = "prefer_more" if self.formal else "prefer_less"
+            translation = self.translator.translate_text(text, source_lang=src_lang, target_lang=dst_lang, formality=formality_option)
+            
+            detected_src = translation.detected_source_lang
+            subtext = f"From {self.languages['source'].get(detected_src, detected_src)} to {self.languages['target'].get(dst_lang, dst_lang)}"
+            
+            actions = [
+                Action("copy", "Copy translation", lambda t=translation.text: setClipboardText(t)),
+                Action("toggle_formality", f"Toggle Formality (Session)", lambda: self.conf_toggle("formal", self.formal))
+            ]
+            
+            results.append(StandardItem(id=md_name, text=translation.text, subtext=subtext, icon_factory=lambda: makeImageIcon(str(self.icon_path)), actions=actions))
+
+        except Exception as e:
+            results.append(StandardItem(id="err", text="Translation Error", subtext=str(e), icon_factory=lambda: makeImageIcon(str(self.icon_path))))
+        
+        if query.isValid:
+            query.add(results)
