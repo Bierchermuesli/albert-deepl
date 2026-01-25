@@ -9,14 +9,14 @@ import deepl
 import threading
 from pathlib import Path
 
-md_iid = "4.0"
+md_iid = "5.0"
 md_version = "2.3"
 md_name = "DeepL Translate"
 md_description = "Translate words and sentences using deepl"
 md_license = "MIT"
 md_url = "https://github.com/albertlauncher/python/"
 md_lib_dependencies = ["deepl"]
-md_maintainers = "@bierchermuesli"
+md_maintainers = ["@Bierchermuesli"]
 
 
 class Plugin(PluginInstance, TriggerQueryHandler):
