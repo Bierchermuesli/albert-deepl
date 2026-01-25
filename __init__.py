@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 
 md_iid = "5.0"
-md_version = "2.3"
+md_version = "2.4"
 md_name = "DeepL Translate"
 md_description = "Translate words and sentences using deepl"
 md_license = "MIT"
@@ -19,7 +19,7 @@ md_lib_dependencies = ["deepl"]
 md_maintainers = ["@Bierchermuesli"]
 
 
-class Plugin(PluginInstance, TriggerQueryHandler):
+class Plugin(PluginInstance, GeneratorQueryHandler):
     # --- private attributes
     _api_key = ""
     _default_source_lang = ""
@@ -32,7 +32,7 @@ class Plugin(PluginInstance, TriggerQueryHandler):
     initializing = False
 
     def __init__(self):
-        TriggerQueryHandler.__init__(self)
+        GeneratorQueryHandler.__init__(self)
         PluginInstance.__init__(self)
         self.icon_path = Path(__file__).parent / "icon.svg"
         self._init_configuration()
@@ -147,7 +147,7 @@ class Plugin(PluginInstance, TriggerQueryHandler):
         finally:
             self.initializing = False
 
-    def _handle_lang_query(self, query, direction: str, search_term: str):
+    def _handle_lang_query(self, search_term, direction: str):
         items = []
         lang_dict = self.languages.get(direction, {})
         
@@ -157,69 +157,29 @@ class Plugin(PluginInstance, TriggerQueryHandler):
                     id=f"{direction}_{code}",
                     text=f"{code} - {name}",
                     subtext=f"Set as default {direction} language",
-                    icon_factory=lambda: makeImageIcon(str(self.icon_path)),
+                    icon_factory=lambda: Icon.image(str(self.icon_path)),
                     actions=[Action(f"set_default_{direction}", f"Set as Default {direction.capitalize()}", lambda c=code, d=direction: setattr(self, f'_default_{d}_lang', c))]
                 ))
-        query.add(items)
+        return items
 
-    def handleTriggerQuery(self, query):
-        if not query.isValid:
-            return
-
-        stripped_query = query.string.strip()
-
-        if self.initializing:
-            query.add(StandardItem(id=md_name, text="Initializing...", subtext="Connecting to DeepL API...", icon_factory=lambda: makeImageIcon(str(self.icon_path))))
-            return
-
-        if not self.translator or not self.languages:
-            actions = [Action("open_settings", "Open Settings", lambda: openConfig())]
-            if not self.api_key:
-                actions.insert(0, Action("url", "Get API Key", lambda: openUrl("https://www.deepl.com/pro#developer")))
-            query.add(StandardItem(
-                id=md_name, text="DeepL not configured or failed to initialize",
-                subtext="Please check your API key and network connection.",
-                icon_factory=lambda: makeImageIcon(str(self.icon_path)),
-                actions=actions
-            ))
-            return
-
-        if stripped_query.startswith("from"):
-            search_term = stripped_query[4:].strip()
-            self._handle_lang_query(query, "source", search_term)
-            return
-            
-        if stripped_query.startswith("to"):
-            search_term = stripped_query[2:].strip()
-            self._handle_lang_query(query, "target", search_term)
-            return
-
-        if stripped_query == "usage":
-            thread = threading.Thread(target=self._get_usage, args=(query,))
-            thread.start()
-            return
-        
-        thread = threading.Thread(target=self._run_translation, args=(query,))
-        thread.start()
-
-    def _get_usage(self, query: Query):
+    def _get_usage(self):
         try:
             usage = self.translator.get_usage()
             text = "This Month's limit reached" if usage.any_limit_reached else "Usage is within limits"
             subtext = f"Characters: {usage.character.count} of {usage.character.limit}" if usage.character else ""
-            query.add(StandardItem(id="usage", text=text, subtext=subtext, icon_factory=lambda: makeImageIcon(str(self.icon_path))))
+            return [StandardItem(id="usage", text=text, subtext=subtext, icon_factory=lambda: Icon.image(str(self.icon_path)))]
         except Exception as e:
-            query.add(StandardItem(id="usage_err", text="Error getting usage", subtext=str(e), icon_factory=lambda: makeImageIcon(str(self.icon_path))))
-            
+            return [StandardItem(id="usage_err", text="Error getting usage", subtext=str(e), icon_factory=lambda: Icon.image(str(self.icon_path)))]
+
     def conf_toggle(self, key, current_value):
         """Temporary session-only toggle for boolean settings."""
         setattr(self, f"_{key}", not current_value)
         info(f"'{key}' toggled to '{getattr(self, f'_{key}')}' for this session.")
 
-    def _run_translation(self, query: Query):
-        results = []
+    def _run_translation(self, query_string):
+        items = []
         try:
-            parts = query.string.strip().split()
+            parts = query_string.split()
             src_lang, dst_lang, text = None, None, ""
 
             if len(parts) >= 2 and parts[0].upper() in self.languages.get('source', {}) and parts[1].upper() in self.languages.get('target', {}):
@@ -227,10 +187,10 @@ class Plugin(PluginInstance, TriggerQueryHandler):
             elif len(parts) >= 1 and parts[0].upper() in self.languages.get('target', {}):
                 src_lang, dst_lang, text = self.default_source_lang or None, parts[0].upper(), " ".join(parts[1:])
             else:
-                src_lang, dst_lang, text = self.default_source_lang or None, self.default_target_lang, query.string.strip()
+                src_lang, dst_lang, text = self.default_source_lang or None, self.default_target_lang, query_string
 
             if not text:
-                return
+                return []
 
             formality_option = "prefer_more" if self.formal else "prefer_less"
             translation = self.translator.translate_text(text, source_lang=src_lang, target_lang=dst_lang, formality=formality_option)
@@ -243,10 +203,45 @@ class Plugin(PluginInstance, TriggerQueryHandler):
                 Action("toggle_formality", f"Toggle Formality (Session)", lambda: self.conf_toggle("formal", self.formal))
             ]
             
-            results.append(StandardItem(id=md_name, text=translation.text, subtext=subtext, icon_factory=lambda: makeImageIcon(str(self.icon_path)), actions=actions))
+            items.append(StandardItem(id=md_name, text=translation.text, subtext=subtext, icon_factory=lambda: Icon.image(str(self.icon_path)), actions=actions))
 
         except Exception as e:
-            results.append(StandardItem(id="err", text="Translation Error", subtext=str(e), icon_factory=lambda: makeImageIcon(str(self.icon_path))))
+            items.append(StandardItem(id="err", text="Translation Error", subtext=str(e), icon_factory=lambda: Icon.image(str(self.icon_path))))
         
-        if query.isValid:
-            query.add(results)
+        return items
+
+    def items(self, ctx):
+        if not ctx.query:
+            return
+
+        stripped_query = ctx.query.strip()
+
+        if self.initializing:
+            yield [StandardItem(id=md_name, text="Initializing...", subtext="Connecting to DeepL API...", icon_factory=lambda: Icon.image(str(self.icon_path)))]
+            return
+
+        if not self.translator or not self.languages:
+            actions = [Action("open_settings", "Open Settings", lambda: openConfig())]
+            if not self.api_key:
+                actions.insert(0, Action("url", "Get API Key", lambda: openUrl("https://www.deepl.com/pro#developer")))
+            yield [StandardItem(
+                id=md_name, text="DeepL not configured or failed to initialize",
+                subtext="Please check your API key and network connection.",
+                icon_factory=lambda: Icon.image(str(self.icon_path)),
+                actions=actions
+            )]
+            return
+
+        if stripped_query.startswith("from"):
+            yield self._handle_lang_query(stripped_query[4:].strip(), "source")
+            return
+            
+        if stripped_query.startswith("to"):
+            yield self._handle_lang_query(stripped_query[2:].strip(), "target")
+            return
+
+        if stripped_query == "usage":
+            yield self._get_usage()
+            return
+        
+        yield self._run_translation(stripped_query)
