@@ -7,10 +7,15 @@ Translator using deepl API
 from albert import *
 import deepl
 import threading
+import time
+import shutil
+import subprocess
 from pathlib import Path
 
+LIVE_DEBOUNCE_SECONDS = 0.5
+
 md_iid = "5.0"
-md_version = "2.4"
+md_version = "2.5"
 md_name = "DeepL Translate"
 md_description = "Translate words and sentences using deepl"
 md_license = "MIT"
@@ -139,7 +144,7 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
                 "source": {lang.code: lang.name for lang in self.translator.get_source_languages()},
                 "target": {lang.code: lang.name for lang in self.translator.get_target_languages()},
             }
-            info(f"DeepL plugin initialized successfully.")
+            info(f"DeepL plugin initialized with API key {self.api_key[3:]}... successfully.")
         except Exception as e:
             self.translator = None
             self.languages = None
@@ -158,7 +163,7 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
                     text=f"{code} - {name}",
                     subtext=f"Set as default {direction} language",
                     icon_factory=lambda: Icon.image(str(self.icon_path)),
-                    actions=[Action(f"set_default_{direction}", f"Set as Default {direction.capitalize()}", lambda c=code, d=direction: setattr(self, f'_default_{d}_lang', c))]
+                    actions=[Action(f"set_default_{direction}", f"Set as Default {direction.capitalize()}", lambda c=code, d=direction: setattr(self, f'default_{d}_lang', c))]
                 ))
         return items
 
@@ -175,6 +180,31 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
         """Temporary session-only toggle for boolean settings."""
         setattr(self, f"_{key}", not current_value)
         info(f"'{key}' toggled to '{getattr(self, f'_{key}')}' for this session.")
+
+    @staticmethod
+    def _copy_and_notify(text):
+        setClipboardText(text)
+        Notification(title="DeepL", text=text[:300]).send()
+
+    @staticmethod
+    def _add_to_copyq(translation, source):
+        if not shutil.which("copyq"):
+            Notification(title="DeepL", text="copyq not installed; falling back to clipboard").send()
+            setClipboardText(translation)
+            return
+        note = f"deepl:{source}" if source else "deepl"
+        try:
+            subprocess.run(
+                ["copyq", "write", "0",
+                 "application/x-copyq-item-notes", note,
+                 "text/plain", translation],
+                check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            Notification(title="DeepL", text=f"Added to CopyQ history\n{translation[:200]}").send()
+        except Exception as e:
+            warning(f"DeepL: copyq add failed: {e}")
+            setClipboardText(translation)
 
     def _run_translation(self, query_string):
         items = []
@@ -199,7 +229,8 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
             subtext = f"From {self.languages['source'].get(detected_src, detected_src)} to {self.languages['target'].get(dst_lang, dst_lang)}"
             
             actions = [
-                Action("copy", "Copy translation", lambda t=translation.text: setClipboardText(t)),
+                Action("copy", "Copy + notify", lambda t=translation.text: self._copy_and_notify(t)),
+                Action("copyq", "Add to CopyQ history", lambda t=translation.text, s=text: self._add_to_copyq(t, s)),
                 Action("toggle_formality", f"Toggle Formality (Session)", lambda: self.conf_toggle("formal", self.formal))
             ]
             
@@ -232,16 +263,31 @@ class Plugin(PluginInstance, GeneratorQueryHandler):
             )]
             return
 
-        if stripped_query.startswith("from"):
-            yield self._handle_lang_query(stripped_query[4:].strip(), "source")
+        if stripped_query == "from" or stripped_query.startswith("from "):
+            yield self._handle_lang_query(stripped_query[5:].strip(), "source")
             return
-            
-        if stripped_query.startswith("to"):
-            yield self._handle_lang_query(stripped_query[2:].strip(), "target")
+
+        if stripped_query == "to" or stripped_query.startswith("to "):
+            yield self._handle_lang_query(stripped_query[3:].strip(), "target")
             return
 
         if stripped_query == "usage":
             yield self._get_usage()
             return
-        
-        yield self._run_translation(stripped_query)
+
+        # Debounce: each keystroke would otherwise spend DeepL quota. Yield a
+        # placeholder, sleep, then bail if the query has already moved on.
+        yield [StandardItem(
+            id="deepl-translating",
+            text="Translating...",
+            subtext=f"{self.default_source_lang or 'auto'} -> {self.default_target_lang}",
+            icon_factory=lambda: Icon.image(str(self.icon_path)),
+        )]
+        time.sleep(LIVE_DEBOUNCE_SECONDS)
+        if not ctx.isValid:
+            return
+
+        results = self._run_translation(stripped_query)
+        if not ctx.isValid:
+            return
+        yield results
